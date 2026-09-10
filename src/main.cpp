@@ -31,8 +31,6 @@ IPAddress   WifiConfigIp(192, 168, 4, 1); // IP of access point in wifi config m
 String selected = "selected";
 String checked = "checked";
 
-const long  gmtOffset_sec = 0; // UTC Time
-const int   daylightOffset_sec = 0; // UTC Time
 const int   doorbellOutputPin = 19; // pin connected to the doorbell (when using hardware connection instead of mqtt to ring the bell)
 
 #ifdef CUSTOM_GPIOS
@@ -78,6 +76,8 @@ long lastMsg = 0;
 char msg[50];
 int value = 0;
 bool mqttConfigValid = true;
+bool ntpEnabled = false;
+String configuredNtpServer;
 
 
 Match lastMatch;
@@ -99,16 +99,39 @@ String getLogMessagesAsHtml() {
 }
 
 String getTimestampString(){
+  if (!ntpEnabled)
+    return "no time";
+
   struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
+  // Logging must not stall fingerprint handling while the clock is not synced.
+  if(!getLocalTime(&timeinfo, 10)){
     return "no time";
   }
   
-  char buffer[25];
-  strftime(buffer,sizeof(buffer),"%Y-%m-%d %H:%M:%S %Z", &timeinfo);
-  String datetime = String(buffer);
-  return datetime;
+  char buffer[32];
+  if (strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S %Z", &timeinfo) == 0)
+    return "no time";
+
+  return String(buffer);
+}
+
+void initTime() {
+  configuredNtpServer = settingsManager.getAppSettings().ntpServer;
+  configuredNtpServer.trim();
+
+  // An empty setting intentionally disables NTP. Do not contact fallback
+  // services the user did not configure.
+  if (configuredNtpServer.isEmpty()) {
+    ntpEnabled = false;
+    Serial.println("NTP is disabled; log timestamps will be unavailable.");
+    return;
+  }
+
+  ntpEnabled = true;
+  // The ESP32 SNTP client retains this pointer, so configuredNtpServer must
+  // remain alive after this function returns.
+  configTime(0, 0, configuredNtpServer.c_str()); // Keep timestamps timezone-neutral (UTC).
+  Serial.println("NTP synchronization started with server '" + configuredNtpServer + "'.");
 }
 
 /* wait for maintenance mode or timeout 5s */
@@ -248,6 +271,28 @@ bool initWifi() {
   WifiSettings wifiSettings = settingsManager.getWifiSettings();
   WiFi.setHostname(wifiSettings.hostname.c_str()); //define hostname
   WiFi.mode(WIFI_STA);
+  String ipConfigMessage;
+
+  // Configure the interface before connecting. Reconfiguring an established
+  // connection can leave DNS and the default route in an inconsistent state.
+  if (!wifiSettings.dhcp_setting &&
+      wifiSettings.localIP.toString() != "0.0.0.0" &&
+      wifiSettings.gatewayIP.toString() != "0.0.0.0" &&
+      wifiSettings.subnetMask.toString() != "0.0.0.0") {
+    if (WiFi.config(wifiSettings.localIP, wifiSettings.gatewayIP,
+                    wifiSettings.subnetMask, wifiSettings.dnsIP0,
+                    wifiSettings.dnsIP1)) {
+      ipConfigMessage = "Static IP address settings were activated.";
+    } else {
+      WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+      ipConfigMessage = "Static IP address settings could not be activated. DHCP is used instead.";
+    }
+  } else {
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+    if (!wifiSettings.dhcp_setting)
+      ipConfigMessage = "Static IP address settings are incomplete. DHCP is used instead.";
+  }
+
   WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.password.c_str());
   int counter = 0;
   while (WiFi.status() != WL_CONNECTED) {
@@ -257,16 +302,9 @@ bool initWifi() {
     if (counter > 30)
       return false;
   }
-  if (!settingsManager.getWifiSettings().dhcp_setting){
-    if (settingsManager.getWifiSettings().localIP.toString() != "0.0.0.0" && settingsManager.getWifiSettings().gatewayIP.toString() != "0.0.0.0" && settingsManager.getWifiSettings().subnetMask.toString() != "0.0.0.0" && settingsManager.getWifiSettings().dnsIP0.toString() != "0.0.0.0" && settingsManager.getWifiSettings().dnsIP1.toString() != "0.0.0.0"){
-      if (WiFi.config(settingsManager.getWifiSettings().localIP, settingsManager.getWifiSettings().gatewayIP, settingsManager.getWifiSettings().subnetMask, settingsManager.getWifiSettings().dnsIP0, settingsManager.getWifiSettings().dnsIP1))
-        notifyClients("Static IP address settings were activated.");
-      else
-        notifyClients("Static IP address settings could not be activated. DHCP is used instead.");
-    } else {
-      notifyClients("Static IP address settings are incomplete. DHCP is used instead.");
-    }
-  }
+  initTime();
+  if (!ipConfigMessage.isEmpty())
+    notifyClients(ipConfigMessage);
 
 
   //initialize mDNS service
@@ -355,9 +393,6 @@ void startWebserver(){
     Serial.println("An Error has occurred while mounting LittleFS");
     return;
   }
-
-  // Init time by NTP Client
-  configTime(gmtOffset_sec, daylightOffset_sec, settingsManager.getAppSettings().ntpServer.c_str());
 
   // Load web page log in credentials
   WebPageSettings webPageSettings = settingsManager.getWebPageSettings();
