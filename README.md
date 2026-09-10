@@ -1,5 +1,13 @@
 # FingerprintDoorbell
 
+## Reliability changes in this fork
+
+- Static network settings are applied before the Wi-Fi connection is established.
+- NTP is optional: an empty NTP server disables synchronization and external requests.
+- Log timestamps use UTC and never block fingerprint or MQTT processing while the clock is unsynchronized.
+- Successful fingerprint MQTT messages are published before non-critical web log updates.
+- Build dependencies are pinned to reproducible revisions.
+
 ## What is FingerprintDoorbell?
 It's more or less a doorbell with the ability to scan finger prints or a fingerprint reader with the ability to act as doorbell, depending on your perspective ;-). But lets speak some images:
 
