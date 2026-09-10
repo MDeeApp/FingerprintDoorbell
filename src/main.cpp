@@ -284,11 +284,14 @@ bool initWifi() {
                     wifiSettings.dnsIP1)) {
       ipConfigMessage = "Static IP address settings were activated.";
     } else {
-      WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+      WiFi.config(IPAddress(), IPAddress(), IPAddress(), IPAddress());
       ipConfigMessage = "Static IP address settings could not be activated. DHCP is used instead.";
     }
   } else {
-    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+    // Use explicit zero addresses to start DHCP. Depending on include order,
+    // INADDR_NONE may resolve to 255.255.255.255 instead of Arduino's
+    // zero-address sentinel.
+    WiFi.config(IPAddress(), IPAddress(), IPAddress(), IPAddress());
     if (!wifiSettings.dhcp_setting)
       ipConfigMessage = "Static IP address settings are incomplete. DHCP is used instead.";
   }
@@ -302,6 +305,19 @@ bool initWifi() {
     if (counter > 30)
       return false;
   }
+
+  // Association with the access point can complete before DHCP has supplied
+  // an address. Do not start network services on an unusable interface.
+  counter = 0;
+  while (WiFi.localIP() == IPAddress()) {
+    delay(100);
+    counter++;
+    if (counter > 100) {
+      Serial.println("WiFi connected, but no IP address was assigned.");
+      return false;
+    }
+  }
+
   initTime();
   if (!ipConfigMessage.isEmpty())
     notifyClients(ipConfigMessage);
