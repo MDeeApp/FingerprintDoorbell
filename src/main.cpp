@@ -775,8 +775,8 @@ void connectMqttClient() {
       !appSettings.mqttServer.isEmpty()) {
     Serial.print("(Re)connect to MQTT broker...");
 
-    // Resolve the configured hostname for every connection attempt. A broker
-    // running in Docker may receive a different address after a restart.
+    // Resolve the configured endpoint for every connection attempt so a
+    // temporary DNS failure does not disable MQTT until the next reboot.
     IPAddress mqttServerIp;
     if (!WiFi.hostByName(appSettings.mqttServer.c_str(), mqttServerIp)) {
       Serial.println("DNS lookup failed");
@@ -842,11 +842,16 @@ void doScan()
 
         if (isNewMatch && pairingValid) {
           // Publish the action topics before non-critical web and log updates.
-          mqttClient.publish((String(mqttRootTopic) + "/ring").c_str(), "off");
-          mqttClient.publish((String(mqttRootTopic) + "/matchId").c_str(), String(match.matchId).c_str());
-          mqttClient.publish((String(mqttRootTopic) + "/matchName").c_str(), match.matchName.c_str());
-          mqttClient.publish((String(mqttRootTopic) + "/matchConfidence").c_str(), String(match.matchConfidence).c_str());
-          Serial.println("MQTT message sent: Open the door!");
+          bool mqttPublishSucceeded = mqttClient.connected() &&
+            mqttClient.publish((String(mqttRootTopic) + "/ring").c_str(), "off") &&
+            mqttClient.publish((String(mqttRootTopic) + "/matchId").c_str(), String(match.matchId).c_str()) &&
+            mqttClient.publish((String(mqttRootTopic) + "/matchName").c_str(), match.matchName.c_str()) &&
+            mqttClient.publish((String(mqttRootTopic) + "/matchConfidence").c_str(), String(match.matchConfidence).c_str());
+
+          if (mqttPublishSucceeded)
+            Serial.println("MQTT message sent: Open the door!");
+          else
+            notifyClients(String("MQTT publish failed: door-open event was not sent (state=") + mqttClient.state() + ").");
         }
 
         notifyClients(String("Match Found: ") + match.matchId + " - " + match.matchName + " with confidence of " + match.matchConfidence);
@@ -861,11 +866,16 @@ void doScan()
       notifyClients(String("No Match Found (Code ") + match.returnCode + ")");
       if (match.scanResult != lastMatch.scanResult) {
         digitalWrite(doorbellOutputPin, HIGH);
-        mqttClient.publish((String(mqttRootTopic) + "/ring").c_str(), "on");
-        mqttClient.publish((String(mqttRootTopic) + "/matchId").c_str(), "-1");
-        mqttClient.publish((String(mqttRootTopic) + "/matchName").c_str(), "");
-        mqttClient.publish((String(mqttRootTopic) + "/matchConfidence").c_str(), "-1");
-        Serial.println("MQTT message sent: ring the bell!");
+        bool mqttPublishSucceeded = mqttClient.connected() &&
+          mqttClient.publish((String(mqttRootTopic) + "/ring").c_str(), "on") &&
+          mqttClient.publish((String(mqttRootTopic) + "/matchId").c_str(), "-1") &&
+          mqttClient.publish((String(mqttRootTopic) + "/matchName").c_str(), "") &&
+          mqttClient.publish((String(mqttRootTopic) + "/matchConfidence").c_str(), "-1");
+
+        if (mqttPublishSucceeded)
+          Serial.println("MQTT message sent: ring the bell!");
+        else
+          notifyClients(String("MQTT publish failed: doorbell event was not sent (state=") + mqttClient.state() + ").");
         delay(1000);
         digitalWrite(doorbellOutputPin, LOW); 
       } else {
