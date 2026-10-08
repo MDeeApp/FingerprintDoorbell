@@ -47,6 +47,7 @@ String logMessages[logMessagesCount]; // log messages, 0=most recent log message
 bool shouldReboot = false;
 unsigned long wifiReconnectPreviousMillis = 0;
 unsigned long mqttReconnectPreviousMillis = 0;
+const unsigned long mqttReconnectIntervalMs = 10000ul;
 unsigned long ota_progress_millis = 0;
 
 String enrollId;
@@ -75,7 +76,6 @@ PubSubClient mqttClient(espClient);
 long lastMsg = 0;
 char msg[50];
 int value = 0;
-bool mqttConfigValid = true;
 bool ntpEnabled = false;
 String configuredNtpServer;
 
@@ -769,18 +769,32 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
 }
 
 void connectMqttClient() {
-  if (!mqttClient.connected() && mqttConfigValid) {
+  AppSettings appSettings = settingsManager.getAppSettings();
+  if (!mqttClient.connected() &&
+      WiFi.status() == WL_CONNECTED &&
+      !appSettings.mqttServer.isEmpty()) {
     Serial.print("(Re)connect to MQTT broker...");
+
+    // Resolve the configured hostname for every connection attempt. A broker
+    // running in Docker may receive a different address after a restart.
+    IPAddress mqttServerIp;
+    if (!WiFi.hostByName(appSettings.mqttServer.c_str(), mqttServerIp)) {
+      Serial.println("DNS lookup failed");
+      notifyClients("MQTT Server '" + appSettings.mqttServer + "' could not be resolved. Will retry.");
+      return;
+    }
+    mqttClient.setServer(mqttServerIp, appSettings.mqttPort);
+
     // Attempt to connect
     bool connectResult;
     
     // connect with or witout authentication
     String lastWillTopic = settingsManager.getAppSettings().mqttRootTopic + "/lastLogMessage";
     String lastWillMessage = "FingerprintDoorbell disconnected unexpectedly";
-    if (settingsManager.getAppSettings().mqttUsername.isEmpty() || settingsManager.getAppSettings().mqttPassword.isEmpty())
+    if (appSettings.mqttUsername.isEmpty() || appSettings.mqttPassword.isEmpty())
       connectResult = mqttClient.connect(settingsManager.getWifiSettings().hostname.c_str(),lastWillTopic.c_str(), 1, false, lastWillMessage.c_str());
     else
-      connectResult = mqttClient.connect(settingsManager.getWifiSettings().hostname.c_str(), settingsManager.getAppSettings().mqttUsername.c_str(), settingsManager.getAppSettings().mqttPassword.c_str(), lastWillTopic.c_str(), 1, false, lastWillMessage.c_str());
+      connectResult = mqttClient.connect(settingsManager.getWifiSettings().hostname.c_str(), appSettings.mqttUsername.c_str(), appSettings.mqttPassword.c_str(), lastWillTopic.c_str(), 1, false, lastWillMessage.c_str());
 
     if (connectResult) {
       // success
@@ -796,10 +810,9 @@ void connectMqttClient() {
 
     } else {
       if (mqttClient.state() == 4 || mqttClient.state() == 5) {
-        mqttConfigValid = false;
-        notifyClients("Failed to connect to MQTT Server: bad credentials or not authorized. Will not try again, please check your settings.");
+        notifyClients("Failed to connect to MQTT Server: bad credentials or not authorized. Will retry; please check your settings if the problem persists.");
       } else {
-        notifyClients(String("Failed to connect to MQTT Server, rc=") + mqttClient.state() + ", try again in 30 seconds");
+        notifyClients(String("Failed to connect to MQTT Server, rc=") + mqttClient.state() + ", will retry");
       }
     }
   }
@@ -940,24 +953,10 @@ void setup()
     if (initWifi()) {
       startWebserver();
       if (settingsManager.getAppSettings().mqttServer.isEmpty()) {
-        mqttConfigValid = false;
         notifyClients("Error: No MQTT Broker is configured! Please go to settings and enter your server URL + user credentials.");
       } else {
-        delay(5000);
-
-        IPAddress mqttServerIp;
-        if (WiFi.hostByName(settingsManager.getAppSettings().mqttServer.c_str(), mqttServerIp))
-        {
-          mqttConfigValid = true;
-          Serial.println("IP used for MQTT server: " + mqttServerIp.toString() + " | Port: " + String(settingsManager.getAppSettings().mqttPort));
-          mqttClient.setServer(mqttServerIp , settingsManager.getAppSettings().mqttPort);
-          mqttClient.setCallback(mqttCallback);
-          connectMqttClient();
-        }
-        else {
-          mqttConfigValid = false;
-          notifyClients("MQTT Server '" + settingsManager.getAppSettings().mqttServer + "' not found. Please check your settings.");
-        }
+        mqttClient.setCallback(mqttCallback);
+        connectMqttClient();
       }
       if (fingerManager.connected) {
         fingerManager.setColorSettings(settingsManager.getColorSettings());
@@ -994,8 +993,8 @@ void loop()
     }
 
     // reconnect mqtt if down
-    if (!settingsManager.getAppSettings().mqttServer.isEmpty()) {
-      if (!mqttClient.connected() && (currentMillis - mqttReconnectPreviousMillis >= 30000ul)) {
+    if (WiFi.status() == WL_CONNECTED && !settingsManager.getAppSettings().mqttServer.isEmpty()) {
+      if (!mqttClient.connected() && (currentMillis - mqttReconnectPreviousMillis >= mqttReconnectIntervalMs)) {
         connectMqttClient();
         mqttReconnectPreviousMillis = currentMillis;
       }
